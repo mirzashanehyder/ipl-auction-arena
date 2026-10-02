@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { execSync } from 'child_process';
 import { PrismaClient } from '@prisma/client';
 import healthRouter from './routes/health.js';
 import sessionRouter from './routes/sessions.js';
@@ -331,10 +332,24 @@ io.on('connection', (socket) => {
   });
 });
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, async () => {
   console.log(`=================================`);
-  console.log(`🚀 IPL Auction Server Running`);
+  console.log(`🚀 IPL Auction Server Running on port ${PORT}`);
   console.log(`📡 REST API Health Check: http://localhost:${PORT}/api/health`);
   console.log(`🔌 Socket.IO Server Ready`);
+
+  try {
+    const userCount = await prisma.user.count();
+    console.log(`[Database] Active users count: ${userCount}`);
+  } catch (dbErr) {
+    console.log('[Database] Missing tables detected. Auto-pushing schema and seeding dataset...');
+    try {
+      execSync('npx prisma db push --accept-data-loss', { stdio: 'inherit' });
+      execSync('node prisma/seed.js', { stdio: 'inherit' });
+      console.log('[Database] Schema pushed and dataset seeded successfully!');
+    } catch (pushErr) {
+      console.error('[Database] Auto-migration error:', pushErr.message);
+    }
+  }
   console.log(`=================================`);
 });
