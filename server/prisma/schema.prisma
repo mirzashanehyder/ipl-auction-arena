@@ -1,0 +1,220 @@
+// Prisma Schema for IPL Auction Arena
+// Stage 5 - Session Participant tracking model
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum SessionStatus {
+  LOBBY
+  LIVE
+  PAUSED
+  COMPLETED
+}
+
+enum AuctionPlayerStatus {
+  AVAILABLE
+  CURRENT
+  SOLD
+  UNSOLD
+}
+
+enum PlayerRole {
+  BATSMAN
+  BOWLER
+  ALL_ROUNDER
+  WICKET_KEEPER
+}
+
+// ==========================================
+// MODELS
+// ==========================================
+
+/// Permanent App User / Host / Participant
+model User {
+  id             String               @id @default(uuid())
+  username       String
+  email          String?              @unique
+  avatarUrl      String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  hostedSessions AuctionSession[]     @relation("HostedSessions")
+  participants   SessionParticipant[]
+  sessionTeams   SessionTeam[]
+  bids           Bid[]
+
+  @@map("users")
+}
+
+/// Permanent Player Master Catalog (independent of individual auction outcomes)
+model Player {
+  id             String           @id @default(uuid())
+  name           String
+  role           String           // BATSMAN, BOWLER, ALL_ROUNDER, WICKET_KEEPER
+  country        String           @default("India")
+  basePrice      Float            // Base price in INR (e.g., 20,000,000 for 2 Cr)
+  category       String           @default("Capped") // Marquee, Capped, Uncapped
+  battingStyle   String?          // Right-hand bat, Left-hand bat
+  bowlingStyle   String?          // Right-arm fast, Right-arm spin, Left-arm spin, etc.
+  isActive       Boolean          @default(true)
+  imageUrl       String?
+  stats          String?          // JSON string payload for statistics
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  auctionPlayers AuctionPlayer[]  // Linked in auction pools
+  purchases      PlayerPurchase[] // Referenced in final purchases
+
+  @@map("players")
+}
+
+/// Permanent IPL Team Master Catalog (reusable across sessions)
+model Team {
+  id                 String           @id @default(uuid())
+  name               String           // e.g. "Chennai Super Kings"
+  shortName          String           @unique // e.g. "CSK"
+  logoUrl            String?
+  primaryColor       String?
+  secondaryColor     String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  sessionTeams       SessionTeam[]
+  auctionPlayersSold AuctionPlayer[]  @relation("SoldToTeam")
+  bids               Bid[]
+  purchases          PlayerPurchase[]
+
+  @@map("teams")
+}
+
+/// Real-time Auction Room / Session
+model AuctionSession {
+  id                  String               @id @default(uuid())
+  roomCode            String               @unique // 6-character shareable room code
+  name                String               // Session title e.g. "IPL Mega Auction 2026"
+  status              String               @default("LOBBY") // LOBBY, LIVE, PAUSED, COMPLETED
+  hostId              String
+  host                User                 @relation("HostedSessions", fields: [hostId], references: [id], onDelete: Restrict)
+  startingPurse       Float                @default(1000000000) // Default 100 Crore INR
+  minBidIncrement     Float                @default(20000000)   // Default 20 Lakhs INR
+  currentAuctionPlayerId String?           // ID of active player being auctioned
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  participants        SessionParticipant[]
+  sessionTeams        SessionTeam[]
+  auctionPlayers      AuctionPlayer[]
+  bids                Bid[]
+  purchases           PlayerPurchase[]
+
+  @@index([roomCode])
+  @@map("auction_sessions")
+}
+
+/// Track participants joined in an auction session
+model SessionParticipant {
+  id             String         @id @default(uuid())
+  sessionId      String
+  session        AuctionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isHost         Boolean        @default(false)
+  isOnline       Boolean        @default(true)
+  joinedAt       DateTime       @default(now())
+
+  @@unique([sessionId, userId])
+  @@index([sessionId])
+  @@map("session_participants")
+}
+
+/// Per-Session Team Allocation & Remaining Purse Tracker
+model SessionTeam {
+  id             String         @id @default(uuid())
+  sessionId      String
+  session        AuctionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  teamId         String
+  team           Team           @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  userId         String?
+  user           User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  startingPurse  Float
+  remainingPurse Float
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@unique([sessionId, teamId])
+  @@index([sessionId])
+  @@map("session_teams")
+}
+
+/// Per-Session Player Auction Status & Outcomes
+model AuctionPlayer {
+  id             String              @id @default(uuid())
+  sessionId      String
+  session        AuctionSession      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  playerId       String
+  player         Player              @relation(fields: [playerId], references: [id], onDelete: Restrict)
+  status         String              @default("AVAILABLE") // AVAILABLE, CURRENT, SOLD, UNSOLD
+  basePrice      Float
+  soldToTeamId   String?
+  soldToTeam     Team?               @relation("SoldToTeam", fields: [soldToTeamId], references: [id], onDelete: SetNull)
+  soldPrice      Float?
+  orderIndex     Int                 @default(0)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  bids           Bid[]
+  purchase       PlayerPurchase?
+
+  @@unique([sessionId, playerId])
+  @@index([sessionId])
+  @@index([sessionId, status])
+  @@map("auction_players")
+}
+
+/// Real-time Bidding Log
+model Bid {
+  id              String         @id @default(uuid())
+  sessionId       String
+  session         AuctionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  auctionPlayerId String
+  auctionPlayer   AuctionPlayer  @relation(fields: [auctionPlayerId], references: [id], onDelete: Cascade)
+  teamId          String
+  team            Team           @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  bidderId        String?
+  bidder          User?          @relation(fields: [bidderId], references: [id], onDelete: SetNull)
+  amount          Float
+  timestamp       DateTime       @default(now())
+
+  @@index([sessionId])
+  @@index([auctionPlayerId])
+  @@map("bids")
+}
+
+/// Completed Squad / Player Acquisition Records
+model PlayerPurchase {
+  id              String         @id @default(uuid())
+  sessionId       String
+  session         AuctionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  auctionPlayerId String         @unique
+  auctionPlayer   AuctionPlayer  @relation(fields: [auctionPlayerId], references: [id], onDelete: Cascade)
+  playerId        String
+  player          Player         @relation(fields: [playerId], references: [id], onDelete: Restrict)
+  teamId          String
+  team            Team           @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  purchasePrice   Float
+  purchasedAt     DateTime       @default(now())
+
+  @@index([sessionId])
+  @@index([teamId])
+  @@map("player_purchases")
+}
