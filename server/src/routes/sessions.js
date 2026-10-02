@@ -1,7 +1,13 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { generateUniqueRoomCode } from '../utils/roomCode.js';
 import { processBid, initializePlayerTimer, getPlayerTimer, scheduleTimerResolution } from '../utils/bidding.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -13,6 +19,40 @@ function shuffleArray(array) {
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
+}
+
+async function ensureAutoSeed() {
+  try {
+    const playerCount = await prisma.player.count();
+    const teamCount = await prisma.team.count();
+    if (playerCount > 0 && teamCount > 0) return;
+
+    console.log('[AutoSeed] Player or Team count is 0. Seeding dataset on-the-fly...');
+    const dataPath = path.join(__dirname, '../../data/players.json');
+    if (!fs.existsSync(dataPath)) return;
+
+    const { teams, players } = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+
+    for (const team of teams) {
+      await prisma.team.upsert({
+        where: { shortName: team.shortName },
+        update: { name: team.name, logoUrl: team.logoUrl, primaryColor: team.primaryColor, secondaryColor: team.secondaryColor },
+        create: { id: team.id, name: team.name, shortName: team.shortName, logoUrl: team.logoUrl, primaryColor: team.primaryColor, secondaryColor: team.secondaryColor }
+      });
+    }
+
+    for (const player of players) {
+      const statsPayload = typeof player.stats === 'object' ? JSON.stringify(player.stats) : player.stats;
+      await prisma.player.upsert({
+        where: { id: player.id },
+        update: { name: player.name, role: player.role, country: player.country, basePrice: player.basePrice, category: player.category || 'Capped', battingStyle: player.battingStyle || null, bowlingStyle: player.bowlingStyle || null, isActive: player.isActive !== undefined ? player.isActive : true, imageUrl: player.imageUrl || null, stats: statsPayload || null },
+        create: { id: player.id, name: player.name, role: player.role, country: player.country, basePrice: player.basePrice, category: player.category || 'Capped', battingStyle: player.battingStyle || null, bowlingStyle: player.bowlingStyle || null, isActive: player.isActive !== undefined ? player.isActive : true, imageUrl: player.imageUrl || null, stats: statsPayload || null }
+      });
+    }
+    console.log('[AutoSeed] Database auto-seeded successfully!');
+  } catch (err) {
+    console.error('[AutoSeed] Error auto-seeding database:', err);
+  }
 }
 
 // POST /api/sessions
@@ -35,6 +75,9 @@ router.post('/', async (req, res) => {
     if (!sessionName || !sessionName.trim()) {
       return res.status(400).json({ success: false, message: 'Session title is required' });
     }
+
+    // Ensure master dataset (teams & players) is seeded before creating session
+    await ensureAutoSeed();
 
     // 1. Create or find host User
     const trimmedHostName = hostName.trim();
@@ -109,9 +152,25 @@ router.post('/', async (req, res) => {
         orderIndex: index + 1
       }));
 
-      await prisma.auctionPlayer.createMany({
-        data: auctionPlayerCreates
-      });
+      try {
+        await prisma.auctionPlayer.createMany({
+          data: auctionPlayerCreates
+        });
+      } catch (err) {
+        console.warn('[Session] createMany failed, inserting players individually:', err.message);
+        for (let index = 0; index < availablePlayers.length; index++) {
+          const player = availablePlayers[index];
+          await prisma.auctionPlayer.create({
+            data: {
+              sessionId: session.id,
+              playerId: player.id,
+              status: 'AVAILABLE',
+              basePrice: player.basePrice,
+              orderIndex: index + 1
+            }
+          });
+        }
+      }
     }
 
     const clientOrigin = process.env.CLIENT_URL || 'http://localhost:5173';
